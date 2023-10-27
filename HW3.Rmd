@@ -1,0 +1,361 @@
+---
+title: 'Homework 3: A prediction model for bikeshares'
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+<!-- knitr global options -->
+```{r, include = FALSE}
+knitr::opts_chunk$set(comment = NA, fig.width = 4, fig.height = 3, fig.align = 'center')
+```
+
+# 1. Preparing the dataset
+
+In this homework, we will use a dataset on bikeshare rentals in London, `london_bikes.csv`, to estimate a demand model using ML methods. An observation corresponds to the number of bike rentals in a single hour of a single day along with other characteristics:
+
+- `timestamp` - the time stamp the rentals occurred on
+- `cnt` - the total number of bikes rented (in each hour)
+- `t1` - the temperature in Celsius
+- `t2` - the feels-like temperature in Celsius
+- `hum` - the humidity
+- `windspeed` - the wind speed
+- `weathercode` - the weather situation (categorical variable)
+- `is_holiday` - whether or not the day was a holiday
+- `is_weekdend` - whether or not the day was a weekday
+- `season` - the season the rentals occurred in
+
+First, load the relevant packages and the data: 
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(torch)
+library(luz) # high-level interface for torch
+library(torchvision) # for datasets and image transformation
+library(torchdatasets) # for datasets we are going to use
+library(zeallot)
+library(lubridate)
+library(ggplot2)
+library(tree)
+library(randomForest)
+bikes <- as_tibble(read.csv("london_bikes.csv"))
+head(bikes)
+```
+
+Loading in the multiplot function from an online site I saw. The source is below.
+(www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2))
+```{r, echo = FALSE}
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+# Exercise \#1. Extracting and cleaning the data.
+1. The data features date-time values in the form of time-stamps. This is a common feature in many datasets. We would like to extract extract time, day and month information to use in the prediction model. To do so, you will use `lubridate` package. Read the documentation for the package and use it to create new column variables `year`, `month`, `day` and `hour` that specify respectively the year, month, day of week and hour to which each observation corresponds to. Then drop the `timestamp` variable as it is no longer needed. 
+# Solution
+```{r}
+bikes <- bikes %>% 
+  # needed bikes$ because timestamp wouldn't work
+  mutate(year = year(bikes$timestamp), month = month(bikes$timestamp), 
+         day = wday(bikes$timestamp), hour = hour(bikes$timestamp)) %>% 
+  select(-timestamp)
+head(bikes)
+```
+
+2. Many of the variables are actually categorical i.e factor variables but not coded as such. Convert all the discrete variables into factors, and name the labels. Here I give a couple of examples. You should perform similar operations for `day`, `month`, `weekend` and `holiday` variables. 
+
+```{r, eval=FALSE}
+bikes$weather_code <- factor(bikes$weather_code,
+                              levels = c(1, 2, 3, 4, 7, 10, 26),
+                              labels = c('Clear', 'Scattered Clouds', 'Broken Clouds', 
+                                         'Cloudy', 'Light Rain', 'Rain/Snow', 'Rain/Snow'))
+
+bikes$season <- factor(bikes$season, 
+                             levels = c(0, 1, 2, 3),
+                             labels = c('Spring', 'Summer', 'Fall','Winter'),
+                             ordered = TRUE)
+
+bikes$is_holiday <- factor(bikes$is_holiday,
+                           levels = c(0, 1),
+                           labels = c('Not Holiday', 'Holiday'))
+
+bikes$is_weekend <- factor(bikes$is_weekend,
+                           levels = c(0, 1),
+                           labels = c('Not Weekend', 'Weekend'))
+# time variables
+bikes$day <- factor(bikes$day,
+                    levels = c(1, 2, 3, 4, 5, 6, 7),
+                    labels = c('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'),
+                    ordered = TRUE)
+
+bikes$month <- factor(bikes$month,
+                      levels = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                      labels = c('January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'october' ,'November', 'December'),
+                      ordered = TRUE)
+head(bikes)
+```
+
+
+# Exercise \#2. Visualising the data
+Plot how the number of rentals changes with
+
+  - Season
+  
+  - Weather
+  
+  - Temperature in Celsius
+  
+  - Hour of day faceted by workday/weekend
+  
+In all cases you should select the appropriate geom and annotate the plots clearly.
+You will be judged on how clear and informative the plots are.
+
+# Solution to Exercise \#2
+```{r, eval = FALSE}
+# generally, to see how one variable changes relative
+# to another, we want to use a scatterplot and keep 
+# the response on the y-axis.
+options(scipen = 999)
+ggplot(bikes) +
+  geom_bar(aes(x = season, y = cnt, fill = season), stat = "identity") +
+  xlab("Season") +
+  ylab("Bikes Rented") +
+  labs(fill = "Season") +
+  scale_fill_manual(values = c("darkgreen", "darkgoldenrod1", "darkorange3", "blue"))
+
+ggplot(bikes) +
+  geom_bar(aes(x = weather_code, y = cnt, fill = weather_code), stat = "identity") +
+  xlab("Weather Type") +
+  ylab("Bikes Rented") +
+  labs(fill = "Weather") +
+  coord_flip()
+
+p <- ggplot(bikes) +
+  geom_point(aes(x = t1, y = cnt, color = t1)) +
+  scale_color_gradient(low = "darkblue", high = "red") +
+  xlab("Temperature in Celsius") +
+  ylab("Bike Rentals") +
+  labs(color = "Temperature")
+
+p2 <- ggplot(bikes) +
+  geom_point(aes(x = t2, y = cnt, color = t1)) +
+  scale_color_gradient(low = "lightblue", high = "darkgoldenrod1") +
+  xlab("Feels-Like Temperature in Celsius") +
+  ylab("Bike Rentals") +
+  labs(color = "Temperature")
+
+# multiplot function is at top of rmd file, and cited.
+multiplot(p, p2)
+
+ggplot(bikes) +
+  geom_col(aes(x = hour, y = cnt, fill = hour)) +
+  facet_wrap(~is_weekend)
+```
+
+
+# Exercise \#3. Running various ML models
+1. Before running any of the ML models, randomly select 25% of the data, and save it as a validation dataset. You will use this only for comparing various ML models. Do not use this data for either training or tuning!
+2. Run a decision tree model for predicting bike rentals. You should make sure to prune the tree and display the final result in a format that is easy to understand.
+3. Run a random forest model for predicting bike rentals.You need to select the `mtry` parameter optimally. Be aware however, that `tuneRF` requires data in the form of a model-matrix, which transforms the original dataset. To get around this issue, do the CV for `mtry` yourself instead of relying on tuneRF.
+4. Finally, run a Neural Network model for predicting bike rentals. As a baseline, run a single layer NN with the number of neurons equal to the number of input variables. Then, try atleast one other NN architecture with with 2 or more hidden layers. Tuning NNs is much more complicated, so you need not select everything optimally, but you do need to come with one that beats the single layer NN. You can then try to see if you can manage to beat Random Forests (important: do not use the validation data at any point in this exercise!).
+
+[Warning: All these algorithms take some time to run, so make sure to start working on the HW early!]
+
+# Solution to Exercise \#3
+Create Validation Set
+```{r}
+# start with the validation set
+set.seed(2022)
+ind <- sample(1:nrow(bikes), 0.25*nrow(bikes))
+testBikes <- bikes[ind,]
+trainBikes <- bikes[-ind,]
+```
+
+```{r, cache=TRUE, eval = FALSE}
+# Decision Tree
+modelTree <- tree(cnt ~ ., trainBikes)
+summary(modelTree)
+plot(modelTree)
+text(modelTree)
+# Tree definitely needs pruning
+pruneTree <- prune.tree(modelTree, best = 5)
+plot(pruneTree)
+text(pruneTree, pretty = 1)
+
+# Random Forest Model
+set.seed(2022)
+MSEoob <- c()
+# loop over the length of all predictors, to get the most 
+# optimal subset mtry
+for(i in 1:12){
+  modelRF <- randomForest(cnt ~ ., data = trainBikes,
+                          importance = TRUE,
+                          mtry = i, 
+                          ntree = 500)
+  # averaging MSE across all trees
+  # Use MSE > RSQ because RSQ is 
+  # used for linear relationships
+  MSEoob[i] <- mean(modelRF$mse)
+}
+optimalMtry <- which.min(MSEoob)
+modelRF <- randomForest(cnt ~ ., data = trainBikes,
+                        importance = TRUE,
+                        mtry = 9,
+                        ntree = 500)
+```
+
+```{r, cache=TRUE, eval = FALSE}
+# Neural Network
+# first make data in the form of a matrix
+set.seed(2022)
+torch_manual_seed(13)
+trainMat <- model.matrix(cnt ~ . - 1, data = trainBikes)
+trainCnt <- as.double(trainBikes$cnt)
+# Make a test and training set out of the OG trainset
+# this will be our third validation set, and used
+# to analyze model selection
+indtwo <- sample(1:nrow(trainMat), 0.20*nrow(trainMat))
+testBiketwo <- trainMat[indtwo,]
+trainBiketwo <- trainMat[-indtwo,]
+
+# Single Layer NN
+modnn = nn_module(
+  initialize = function(input_size) {
+    self$hidden = nn_linear(input_size, 34)
+    self$activation = nn_relu()
+    self$output = nn_linear(34, 1)
+  },
+  forward = function(x) {
+    x %>% 
+      self$hidden() %>% 
+      self$activation() %>% 
+      self$output()
+  }
+)
+modnn = modnn %>% 
+  setup(
+    loss = nn_mse_loss(),
+    optimizer = optim_rmsprop,
+    metrics = list(luz_metric_mae())
+  ) %>% 
+  set_hparams(input_size = ncol(trainMat))
+
+fitted <- modnn %>% 
+  fit(
+    data = list(trainBiketwo, matrix(trainCnt[-indtwo], ncol = 1)),
+    valid_data = list(testBiketwo, matrix(trainCnt[indtwo], ncol = 1)),
+  )
+
+pred <- predict(fitted, testBiketwo)
+singleMSE <- mean((trainCnt[indtwo] - as.matrix(pred))^2)
+[1] 782393.4
+```
+
+```{r, cache=TRUE, eval = FALSE}
+set.seed(2022)
+torch_manual_seed(13)
+multimodnn = nn_module(
+  initialize = function(input_size) {
+    self$hidden1 = nn_linear(input_size, 34)
+    self$drop1 = nn_dropout(p = 0.40)
+    self$hidden2 = nn_linear(34, 15)
+    #self$drop2 = nn_dropout(p = 0.10)
+    #self$hidden3 = nn_linear(25, 15)
+    #self$drop3 = nn_dropout(p = 0.10)
+    #self$hidden4 = nn_linear(15, 5)
+    
+    self$activation = nn_relu()
+    self$output = nn_linear(15, 1)
+  },
+  forward = function(x) {
+    x %>% 
+      self$hidden1() %>% 
+      # self$drop1() %>% 
+      self$hidden2() %>% 
+      #self$drop2() %>% 
+      #self$hidden3() %>% 
+      #self$drop3() %>% 
+      #self$hidden4() %>% 
+      self$activation() %>% 
+      self$output()
+  }
+)
+multimodnn = multimodnn %>% 
+  setup(
+    loss = nn_mse_loss(),
+    optimizer = optim_rmsprop,
+    metrics = list(luz_metric_mae())
+  ) %>% 
+  set_hparams(input_size = ncol(trainMat))
+
+multifitted <- multimodnn %>% 
+  fit(
+    data = list(trainBiketwo, matrix(trainCnt[-indtwo], ncol = 1)),
+    valid_data = list(testBiketwo, matrix(trainCnt[indtwo], ncol = 1)),
+  )
+multipred <- predict(multifitted, testBiketwo)
+multiMSE <- mean((trainCnt[indtwo] - as.matrix(multipred))^2)
+[1] 777718.3
+```
+# Exercise \#4. Comparing the models and interpreting results
+1. Take your preferred NN model and compute the test MSE of all three ML models using the validation data. Which one would you suggest to use?
+2. Generate importance plots for the Random Forest model. Which variable is the most important?
+
+# Solution to Exercise \#4
+```{r, eval = FALSE}
+validCnt <- testBikes$cnt
+# MSE of regression tree
+predTree <- predict(pruneTree, newdata = testBikes)
+treeMSE <- mean((predTree - validCnt)^2)
+
+# MSE and importance plot of random forest
+predForest <- predict(modelRF, testBikes)
+forestMSE <- mean((predForest - validCnt)^2)
+varImpPlot(modelRF)
+# MSE of Multi-NN
+X <- scale(model.matrix(cnt ~ . - 1, data = testBikes))
+newdata <- list(X, matrix(validCnt, ncol = 1))
+evaluation <- evaluate(multifitted, newdata)
+get_metrics(evaluation)
+
+multiNNMSE <- get_metrics(evaluation)$value[1]
+# model evaluation
+cbind(treeMSE, forestMSE, multiNNMSE)
+# from this we can see a clear victory in 
+# the random forest's MSE.
+```
+
+
+
+
